@@ -100,15 +100,15 @@ class QGPipeline:
         add_special_tokens=True,
         max_length=512
     ):
-        inputs = self.tokenizer.batch_encode_plus(
-            inputs, 
-            max_length=max_length,
-            add_special_tokens=add_special_tokens,
-            truncation=truncation,
-            padding="max_length" if padding else False,
-            pad_to_max_length=padding,
-            return_tensors="pt"
-        )
+        inputs = self.tokenizer(
+        inputs,
+    	max_length=max_length,
+    	add_special_tokens=add_special_tokens,
+    	truncation=truncation,
+    	padding="max_length" if padding else True,
+    	return_tensors="pt"
+	)
+
         return inputs
     
     def _prepare_inputs_for_ans_extraction(self, text):
@@ -271,15 +271,15 @@ class E2EQGPipeline:
         add_special_tokens=True,
         max_length=512
     ):
-        inputs = self.tokenizer.batch_encode_plus(
-            inputs, 
-            max_length=max_length,
-            add_special_tokens=add_special_tokens,
-            truncation=truncation,
-            padding="max_length" if padding else False,
-            pad_to_max_length=padding,
-            return_tensors="pt"
-        )
+        inputs = self.tokenizer(
+    	inputs,
+    	max_length=max_length,
+    	add_special_tokens=add_special_tokens,
+    	truncation=truncation,
+    	padding="max_length" if padding else True,
+    	return_tensors="pt"
+)
+
         return inputs
 
 
