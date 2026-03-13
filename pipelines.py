@@ -157,7 +157,8 @@ class QGPipeline:
                 if self.model_type == "t5":
                     source_text = source_text + " </s>"
 
-                inputs.append({"answer": answer_text, "source_text": source_text})
+                inputs.append({"answer": answer_text.replace("<pad>", "").strip(),"source_text": source_text})
+
 
         return inputs
     
