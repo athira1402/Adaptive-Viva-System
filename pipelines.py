@@ -44,10 +44,27 @@ class QGPipeline:
 
     def _clean_tech_text(self, text):
         """Standardizes algorithm notation for better model understanding"""
-        text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) # O(n) -> Big O of n
-        text = re.sub(r'(\w+)\[(\w+)\]', r'\1 element \2', text) # A[i] -> A element i
+        text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) 
+        text = re.sub(r'(\w+)\[(\w+)\]', r'\1 element \2', text) 
         text = text.replace('log n', 'logarithmic n').replace('n^2', 'n squared')
         return " ".join(text.split())
+
+    def process_viva_text(self, input_text, chunk_size=3):
+        """
+        Processes long text by chunking it semantically to maintain context 
+        and feeding it into the pipeline.
+        """
+        sentences = sent_tokenize(input_text)
+        chunks = [" ".join(sentences[i:i + chunk_size]) for i in range(0, len(sentences), chunk_size)]
+        
+        all_results = []
+        for chunk in chunks:
+            try:
+                results = self.__call__(chunk)
+                all_results.extend(results)
+            except Exception as e:
+                logger.error(f"Error processing chunk: {e}")
+        return all_results
 
     def __call__(self, inputs: str):
         inputs = " ".join(inputs.split())
@@ -70,12 +87,11 @@ class QGPipeline:
     def _generate_questions(self, inputs):
         inputs = self._tokenize(inputs, padding=True, truncation=True)
         
-        # INCREASED num_beams and length_penalty to fix long sentence truncation
         outs = self.model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
             max_length=64,
-            num_beams=5,
+            num_beams=8, # High beam search for viva accuracy
             length_penalty=1.5,
             no_repeat_ngram_size=3,
             early_stopping=True
@@ -94,9 +110,10 @@ class QGPipeline:
             max_length=32,
         )
         
-        dec = [self.ans_tokenizer.decode(ids, skip_special_tokens=False) for ids in outs]
+        # skip_special_tokens=True fixed the <pad> issue
+        dec = [self.ans_tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
         answers = [item.split('<sep>') for item in dec]
-        answers = [i[:-1] for i in answers]
+        answers = [i[:-1] if i[-1] == '' else i for i in answers]
         
         return sents, answers
     
@@ -131,18 +148,17 @@ class QGPipeline:
         for i, answer in enumerate(answers):
             if len(answer) == 0: continue
             for answer_text in answer:
-                sent = sents[i]
                 sents_copy = [self._clean_tech_text(s) for s in sents]
-                
                 clean_ans = self._clean_tech_text(answer_text.strip())
-                # Highlight logic on cleaned text
                 clean_sent = sents_copy[i]
+                
+                # Highlight logic with fallback to ensure <hl> tags are present
                 try:
-                    ans_start_idx = clean_sent.index(clean_ans)
-                    clean_sent = f"{clean_sent[:ans_start_idx]} <hl> {clean_ans} <hl> {clean_sent[ans_start_idx + len(clean_ans): ]}"
-                    sents_copy[i] = clean_sent
-                except ValueError:
-                    pass # Fallback if cleaning mismatch occurs
+                    if clean_ans in clean_sent:
+                        clean_sent = clean_sent.replace(clean_ans, f"<hl> {clean_ans} <hl>", 1)
+                        sents_copy[i] = clean_sent
+                except Exception:
+                    pass 
                 
                 source_text = "generate question: " + " ".join(sents_copy)
                 if self.model_type == "t5":
@@ -161,41 +177,6 @@ class QGPipeline:
                 source_text += " </s>"
             examples.append({"answer": answer, "source_text": source_text})
         return examples
-
-# Rest of classes (MultiTaskQAQGPipeline, E2EQGPipeline, pipeline function) remain unchanged 
-# to ensure total compatibility with your existing script.
-    
-class MultiTaskQAQGPipeline(QGPipeline):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    
-    def __call__(self, inputs: Union[Dict, str]):
-        if type(inputs) is str:
-            # do qg
-            return super().__call__(inputs)
-        else:
-            # do qa
-            return self._extract_answer(inputs["question"], inputs["context"])
-    
-    def _prepare_inputs_for_qa(self, question, context):
-        source_text = f"question: {question}  context: {context}"
-        if self.model_type == "t5":
-            source_text = source_text + " </s>"
-        return  source_text
-    
-    def _extract_answer(self, question, context):
-        source_text = self._prepare_inputs_for_qa(question, context)
-        inputs = self._tokenize([source_text], padding=False)
-    
-        outs = self.model.generate(
-            input_ids=inputs['input_ids'].to(self.device), 
-            attention_mask=inputs['attention_mask'].to(self.device), 
-            max_length=16,
-        )
-
-        answer = self.tokenizer.decode(outs[0], skip_special_tokens=True)
-        return answer
-
 
 class E2EQGPipeline:
     def __init__(
