@@ -44,7 +44,7 @@ class QGPipeline:
 
     def _clean_tech_text(self, text):
         """Standardizes algorithm notation for better model understanding"""
-        text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) 
+        # text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) 
         text = re.sub(r'(\w+)\[(\w+)\]', r'\1 element \2', text) 
         text = text.replace('log n', 'logarithmic n').replace('n^2', 'n squared')
         return " ".join(text.split())
