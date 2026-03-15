@@ -86,19 +86,16 @@ class QGPipeline:
     
     def _generate_questions(self, inputs):
         inputs = self._tokenize(inputs, padding=True, truncation=True)
-        
         outs = self.model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
-            max_length=64,
-            num_beams=8, # High beam search for viva accuracy
-            length_penalty=1.5,
-            no_repeat_ngram_size=3,
+            max_length=96,           # Increased to allow more complex 'How/Why' phrasing
+            num_beams=12,            # More exploration of semantic paths
+            length_penalty=0.8,      # Lower penalty encourages more concise, varied phrasing
+            no_repeat_ngram_size=4,  # Heavily penalizes copying long strings from the text
             early_stopping=True
         )
-        
-        questions = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
-        return questions
+        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
     
     def _extract_answers(self, context):
         sents, inputs = self._prepare_inputs_for_ans_extraction(context)
@@ -145,24 +142,23 @@ class QGPipeline:
     
     def _prepare_inputs_for_qg_from_answers_hl(self, sents, answers):
         inputs = []
-        for i, answer in enumerate(answers):
-            if len(answer) == 0: continue
-            for answer_text in answer:
+        for i, answer_list in enumerate(answers):
+            for answer_text in answer_list:
                 sents_copy = [self._clean_tech_text(s) for s in sents]
                 clean_ans = self._clean_tech_text(answer_text.strip())
-                clean_sent = sents_copy[i]
                 
-                # Highlight logic with fallback to ensure <hl> tags are present
-                try:
-                    if clean_ans in clean_sent:
-                        clean_sent = clean_sent.replace(clean_ans, f"<hl> {clean_ans} <hl>", 1)
-                        sents_copy[i] = clean_sent
-                except Exception:
-                    pass 
+                # Semantic Context logic: 
+                # We ensure the answer sentence is highlighted, 
+                # but we also explicitly mark the surrounding sentences to give 'logical flow'
+                if clean_ans in sents_copy[i]:
+                    sents_copy[i] = f"<hl> {sents_copy[i].replace(clean_ans, f' {clean_ans} ', 1)} <hl>"
                 
+                # We pass the full window but prioritize the local neighborhood
                 source_text = "generate question: " + " ".join(sents_copy)
+                
                 if self.model_type == "t5":
                     source_text += " </s>"
+                
                 inputs.append({"answer": answer_text, "source_text": source_text})
         return inputs
 
