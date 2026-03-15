@@ -43,24 +43,50 @@ class QGPipeline:
             self.model_type = "bart"
 
     def _clean_tech_text(self, text):
-        """Standardizes algorithm notation for better model understanding"""
-        text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) 
-        text = re.sub(r'(\w+)\[(\w+)\]', r'\1 element \2', text) 
-        text = text.replace('log n', 'logarithmic n').replace('n^2', 'n squared')
+        """Stable cleaning logic for technical terms"""
+        text = re.sub(r'O\((.*?)\)', r'Big-O \1', text) 
+        text = text.replace('log n', 'log-n').replace('n^2', 'n-squared')
         return " ".join(text.split())
+
+    def _generate_questions(self, inputs):
+        """Restored to the stable settings you preferred"""
+        inputs = self._tokenize(inputs, padding=True, truncation=True)
+        outs = self.model.generate(
+            input_ids=inputs['input_ids'].to(self.device), 
+            attention_mask=inputs['attention_mask'].to(self.device), 
+            max_length=64,
+            num_beams=8,           # Reverted to stable beam
+            length_penalty=1.5,    # Reverted to original penalty
+            no_repeat_ngram_size=3,
+            early_stopping=True
+        )
+        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
 
     def process_viva_text(self, input_text, chunk_size=3):
         """
-        Processes long text by chunking it semantically to maintain context 
-        and feeding it into the pipeline.
+        Generalized processing that injects the main subject into chunks 
+        to fix weak pronoun issues (it, they, this).
         """
         sentences = sent_tokenize(input_text)
+        
+        # 1. Identify the Main Subject (usually the first noun phrase in the text)
+        # For 'Binary search is...', subject = 'Binary search'
+        first_sent = sentences[0]
+        subject_match = re.match(r'^([\w\s]+?)\s+(is|was|follows|refers)', first_sent)
+        main_subject = subject_match.group(1) if subject_match else "The algorithm"
+
         chunks = [" ".join(sentences[i:i + chunk_size]) for i in range(0, len(sentences), chunk_size)]
         
         all_results = []
         for chunk in chunks:
+            # 2. Semantic Injection: Replace weak pronouns with the Main Subject
+            # This prevents questions like "What does it follow?" 
+            # and forces "What does Binary search follow?"
+            refined_chunk = re.sub(r'\b(It|They|This algorithm)\b', main_subject, chunk)
+            refined_chunk = re.sub(r'\b(it|they)\b', main_subject.lower(), refined_chunk)
+
             try:
-                results = self.__call__(chunk)
+                results = self.__call__(refined_chunk)
                 all_results.extend(results)
             except Exception as e:
                 logger.error(f"Error processing chunk: {e}")
@@ -83,19 +109,6 @@ class QGPipeline:
         questions = self._generate_questions(qg_inputs)
         output = [{'answer': example['answer'], 'question': que} for example, que in zip(qg_examples, questions)]
         return output
-    
-    def _generate_questions(self, inputs):
-        inputs = self._tokenize(inputs, padding=True, truncation=True)
-        outs = self.model.generate(
-            input_ids=inputs['input_ids'].to(self.device), 
-            attention_mask=inputs['attention_mask'].to(self.device), 
-            max_length=96,           # Increased to allow more complex 'How/Why' phrasing
-            num_beams=12,            # More exploration of semantic paths
-            length_penalty=0.8,      # Lower penalty encourages more concise, varied phrasing
-            no_repeat_ngram_size=4,  # Heavily penalizes copying long strings from the text
-            early_stopping=True
-        )
-        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
     
     def _extract_answers(self, context):
         sents, inputs = self._prepare_inputs_for_ans_extraction(context)
