@@ -178,6 +178,38 @@ class QGPipeline:
             examples.append({"answer": answer, "source_text": source_text})
         return examples
 
+   
+class MultiTaskQAQGPipeline(QGPipeline):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    
+    def __call__(self, inputs: Union[Dict, str]):
+        if type(inputs) is str:
+            # do qg
+            return super().__call__(inputs)
+        else:
+            # do qa
+            return self._extract_answer(inputs["question"], inputs["context"])
+    
+    def _prepare_inputs_for_qa(self, question, context):
+        source_text = f"question: {question}  context: {context}"
+        if self.model_type == "t5":
+            source_text = source_text + " </s>"
+        return  source_text
+    
+    def _extract_answer(self, question, context):
+        source_text = self._prepare_inputs_for_qa(question, context)
+        inputs = self._tokenize([source_text], padding=False)
+    
+        outs = self.model.generate(
+            input_ids=inputs['input_ids'].to(self.device), 
+            attention_mask=inputs['attention_mask'].to(self.device), 
+            max_length=16,
+        )
+
+        answer = self.tokenizer.decode(outs[0], skip_special_tokens=True)
+        return answer
+
 class E2EQGPipeline:
     def __init__(
         self,
