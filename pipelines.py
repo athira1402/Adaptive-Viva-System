@@ -49,11 +49,24 @@ class QGPipeline:
         text = text.replace('log n', 'logarithmic n').replace('n^2', 'n squared')
         return " ".join(text.split())
 
+    # def process_viva_text(self, input_text, chunk_size=3):
+    #     """
+    #     Processes long text by chunking it semantically to maintain context 
+    #     and feeding it into the pipeline.
+    #     """
+    #     sentences = sent_tokenize(input_text)
+    #     chunks = [" ".join(sentences[i:i + chunk_size]) for i in range(0, len(sentences), chunk_size)]
+        
+    #     all_results = []
+    #     for chunk in chunks:
+    #         try:
+    #             results = self.__call__(chunk)
+    #             all_results.extend(results)
+    #         except Exception as e:
+    #             logger.error(f"Error processing chunk: {e}")
+    #     return all_results
+
     def process_viva_text(self, input_text, chunk_size=3):
-        """
-        Processes long text by chunking it semantically to maintain context 
-        and feeding it into the pipeline.
-        """
         sentences = sent_tokenize(input_text)
         chunks = [" ".join(sentences[i:i + chunk_size]) for i in range(0, len(sentences), chunk_size)]
         
@@ -61,7 +74,11 @@ class QGPipeline:
         for chunk in chunks:
             try:
                 results = self.__call__(chunk)
-                all_results.extend(results)
+                for res in results:
+                    # Semantic Check: Ensure the answer is not a fragment
+                    # Proper answers for evaluation usually contain more than 3 words
+                    if len(res['answer'].split()) >= 3:
+                        all_results.append(res)
             except Exception as e:
                 logger.error(f"Error processing chunk: {e}")
         return all_results
@@ -84,37 +101,75 @@ class QGPipeline:
         output = [{'answer': example['answer'], 'question': que} for example, que in zip(qg_examples, questions)]
         return output
     
-    def _generate_questions(self, inputs):
-        inputs = self._tokenize(inputs, padding=True, truncation=True)
+    # def _generate_questions(self, inputs):
+    #     inputs = self._tokenize(inputs, padding=True, truncation=True)
         
+    #     outs = self.model.generate(
+    #         input_ids=inputs['input_ids'].to(self.device), 
+    #         attention_mask=inputs['attention_mask'].to(self.device), 
+    #         max_length=64,
+    #         num_beams=8, # High beam search for viva accuracy
+    #         length_penalty=1.5,
+    #         no_repeat_ngram_size=3,
+    #         early_stopping=True
+    #     )
+        
+    #     questions = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
+    #     return questions
+    
+    # def _extract_answers(self, context):
+    #     sents, inputs = self._prepare_inputs_for_ans_extraction(context)
+    #     inputs = self._tokenize(inputs, padding=True, truncation=True)
+
+    #     outs = self.ans_model.generate(
+    #         input_ids=inputs['input_ids'].to(self.device), 
+    #         attention_mask=inputs['attention_mask'].to(self.device), 
+    #         max_length=32,
+    #     )
+        
+    #     # skip_special_tokens=True fixed the <pad> issue
+    #     dec = [self.ans_tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
+    #     answers = [item.split('<sep>') for item in dec]
+    #     answers = [i[:-1] if i[-1] == '' else i for i in answers]
+        
+    #     return sents, answers
+
+    def _generate_questions(self, inputs):
+        """Generates questions using beam search for structural stability."""
+        inputs = self._tokenize(inputs, padding=True, truncation=True)
         outs = self.model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
             max_length=64,
-            num_beams=8, # High beam search for viva accuracy
+            num_beams=8,
             length_penalty=1.5,
             no_repeat_ngram_size=3,
             early_stopping=True
         )
-        
-        questions = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
-        return questions
-    
+        return [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
+
     def _extract_answers(self, context):
+        """
+        Modified to generate descriptive, full-sentence answers 
+        instead of short fragments.
+        """
         sents, inputs = self._prepare_inputs_for_ans_extraction(context)
         inputs = self._tokenize(inputs, padding=True, truncation=True)
 
+        # We increase max_length and use a slightly higher length_penalty 
+        # to encourage the model to write a full descriptive sentence.
         outs = self.ans_model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
-            max_length=32,
+            max_length=64, # Increased for 'Proper' answers
+            num_beams=4,
+            length_penalty=1.2, 
+            early_stopping=True
         )
         
-        # skip_special_tokens=True fixed the <pad> issue
         dec = [self.ans_tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
-        answers = [item.split('<sep>') for item in dec]
-        answers = [i[:-1] if i[-1] == '' else i for i in answers]
-        
+        # Robust splitting logic
+        answers = [[a.strip() for a in item.split('<sep>') if len(a.strip()) > 5] for item in dec]
         return sents, answers
     
     def _tokenize(self, inputs, padding=True, truncation=True, add_special_tokens=True, max_length=512):
