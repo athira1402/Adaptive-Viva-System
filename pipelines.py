@@ -1,11 +1,11 @@
 import itertools
 import logging
+import re
 from typing import Optional, Dict, Union
 
 from nltk import sent_tokenize
-
 import torch
-from transformers import(
+from transformers import (
     AutoModelForSeq2SeqLM, 
     AutoTokenizer,
     PreTrainedModel,
@@ -15,7 +15,7 @@ from transformers import(
 logger = logging.getLogger(__name__)
 
 class QGPipeline:
-    """Poor man's QG pipeline"""
+    """Refined QG pipeline for Technical Contexts (Sorting/Searching)"""
     def __init__(
         self,
         model: PreTrainedModel,
@@ -27,10 +27,8 @@ class QGPipeline:
     ):
         self.model = model
         self.tokenizer = tokenizer
-
         self.ans_model = ans_model
         self.ans_tokenizer = ans_tokenizer
-
         self.qg_format = qg_format
 
         self.device = "cuda" if torch.cuda.is_available() and use_cuda else "cpu"
@@ -39,12 +37,17 @@ class QGPipeline:
         if self.ans_model is not self.model:
             self.ans_model.to(self.device)
 
-        assert self.model.__class__.__name__ in ["T5ForConditionalGeneration", "BartForConditionalGeneration"]
-        
         if "T5ForConditionalGeneration" in self.model.__class__.__name__:
             self.model_type = "t5"
         else:
             self.model_type = "bart"
+
+    def _clean_tech_text(self, text):
+        """Standardizes algorithm notation for better model understanding"""
+        text = re.sub(r'O\((.*?)\)', r'Big O of \1', text) # O(n) -> Big O of n
+        text = re.sub(r'(\w+)\[(\w+)\]', r'\1 element \2', text) # A[i] -> A element i
+        text = text.replace('log n', 'logarithmic n').replace('n^2', 'n squared')
+        return " ".join(text.split())
 
     def __call__(self, inputs: str):
         inputs = " ".join(inputs.split())
@@ -67,11 +70,15 @@ class QGPipeline:
     def _generate_questions(self, inputs):
         inputs = self._tokenize(inputs, padding=True, truncation=True)
         
+        # INCREASED num_beams and length_penalty to fix long sentence truncation
         outs = self.model.generate(
             input_ids=inputs['input_ids'].to(self.device), 
             attention_mask=inputs['attention_mask'].to(self.device), 
-            max_length=32,
-            num_beams=4,
+            max_length=64,
+            num_beams=5,
+            length_penalty=1.5,
+            no_repeat_ngram_size=3,
+            early_stopping=True
         )
         
         questions = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in outs]
@@ -93,86 +100,70 @@ class QGPipeline:
         
         return sents, answers
     
-    def _tokenize(self,
-        inputs,
-        padding=True,
-        truncation=True,
-        add_special_tokens=True,
-        max_length=512
-    ):
-        inputs = self.tokenizer(
-        inputs,
-    	max_length=max_length,
-    	add_special_tokens=add_special_tokens,
-    	truncation=truncation,
-    	padding="max_length" if padding else True,
-    	return_tensors="pt"
-	)
-
+    def _tokenize(self, inputs, padding=True, truncation=True, add_special_tokens=True, max_length=512):
+        inputs = self.tokenizer.batch_encode_plus(
+            inputs, 
+            max_length=max_length,
+            add_special_tokens=add_special_tokens,
+            truncation=truncation,
+            padding="max_length" if padding else False,
+            return_tensors="pt"
+        )
         return inputs
     
     def _prepare_inputs_for_ans_extraction(self, text):
         sents = sent_tokenize(text)
-
         inputs = []
         for i in range(len(sents)):
             source_text = "extract answers:"
             for j, sent in enumerate(sents):
                 if i == j:
                     sent = "<hl> %s <hl>" % sent
-                source_text = "%s %s" % (source_text, sent)
-                source_text = source_text.strip()
+                source_text = "%s %s" % (source_text, self._clean_tech_text(sent))
             
             if self.model_type == "t5":
                 source_text = source_text + " </s>"
-            inputs.append(source_text)
-
+            inputs.append(source_text.strip())
         return sents, inputs
     
     def _prepare_inputs_for_qg_from_answers_hl(self, sents, answers):
         inputs = []
         for i, answer in enumerate(answers):
-            if len(answer) == 0:
-                continue
+            if len(answer) == 0: continue
             for answer_text in answer:
                 sent = sents[i]
-                sents_copy = sents[:]
-
-                answer_text = answer_text.strip()
-
-                if answer_text in sent:
-                    ans_start_idx = sent.index(answer_text)
-                    sent = (
-                        f"{sent[:ans_start_idx]} <hl> {answer_text} <hl> "
-                        f"{sent[ans_start_idx + len(answer_text):]}"
-                    )
-                else:
-                    # fallback: if not found, just append highlights
-                    sent = f"{sent} <hl> {answer_text} <hl>"
-
-                sents_copy[i] = sent
-
-                source_text = " ".join(sents_copy)
-                source_text = f"generate question: {source_text}"
+                sents_copy = [self._clean_tech_text(s) for s in sents]
+                
+                clean_ans = self._clean_tech_text(answer_text.strip())
+                # Highlight logic on cleaned text
+                clean_sent = sents_copy[i]
+                try:
+                    ans_start_idx = clean_sent.index(clean_ans)
+                    clean_sent = f"{clean_sent[:ans_start_idx]} <hl> {clean_ans} <hl> {clean_sent[ans_start_idx + len(clean_ans): ]}"
+                    sents_copy[i] = clean_sent
+                except ValueError:
+                    pass # Fallback if cleaning mismatch occurs
+                
+                source_text = "generate question: " + " ".join(sents_copy)
                 if self.model_type == "t5":
-                    source_text = source_text + " </s>"
-
-                inputs.append({"answer": answer_text.replace("<pad>", "").strip(),"source_text": source_text})
-
-
+                    source_text += " </s>"
+                inputs.append({"answer": answer_text, "source_text": source_text})
         return inputs
-    
+
     def _prepare_inputs_for_qg_from_answers_prepend(self, context, answers):
         flat_answers = list(itertools.chain(*answers))
         examples = []
+        clean_context = self._clean_tech_text(context)
         for answer in flat_answers:
-            source_text = f"answer: {answer} context: {context}"
+            clean_ans = self._clean_tech_text(answer)
+            source_text = f"answer: {clean_ans} context: {clean_context}"
             if self.model_type == "t5":
-                source_text = source_text + " </s>"
-            
+                source_text += " </s>"
             examples.append({"answer": answer, "source_text": source_text})
         return examples
 
+# Rest of classes (MultiTaskQAQGPipeline, E2EQGPipeline, pipeline function) remain unchanged 
+# to ensure total compatibility with your existing script.
     
 class MultiTaskQAQGPipeline(QGPipeline):
     def __init__(self, **kwargs):
